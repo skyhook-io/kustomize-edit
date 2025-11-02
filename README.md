@@ -16,7 +16,7 @@ Updates kustomize overlays with new image tags, labels, and annotations.
 ### Single image (recommended - separate image and tag)
 ```yaml
 - name: Update kustomize overlay
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     image: backend
@@ -26,7 +26,7 @@ Updates kustomize overlays with new image tags, labels, and annotations.
 ### Single image (backwards compatible - image:tag format)
 ```yaml
 - name: Update kustomize overlay
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     image: backend:v1.2.3
@@ -35,7 +35,7 @@ Updates kustomize overlays with new image tags, labels, and annotations.
 ### Multiple images
 ```yaml
 - name: Update multiple images
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     images_json: |
@@ -80,7 +80,7 @@ Updates kustomize overlays with new image tags, labels, and annotations.
 ### Basic image update
 ```yaml
 - name: Update image tag
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/staging
     image: myapp
@@ -90,7 +90,7 @@ Updates kustomize overlays with new image tags, labels, and annotations.
 ### With labels and annotations
 ```yaml
 - name: Full update
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     image: backend
@@ -108,7 +108,7 @@ Updates kustomize overlays with new image tags, labels, and annotations.
 ### With debug output
 ```yaml
 - name: Update with debugging
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/staging
     image: api
@@ -119,7 +119,7 @@ Updates kustomize overlays with new image tags, labels, and annotations.
 ### Patch environment files (Recommended)
 ```yaml
 - name: Deploy with runtime configuration
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     image: backend
@@ -139,7 +139,7 @@ This patches environment files (like `container.env` or `.env`) that are used by
 ### Multiple environment files
 ```yaml
 - name: Patch multiple env files
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     env_patches: |
@@ -157,14 +157,14 @@ This patches environment files (like `container.env` or `.env`) that are used by
 ### Update multiple images
 ```yaml
 - name: Update API image
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/dev
     image: api
     tag: latest
 
 - name: Update worker image
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/dev
     image: worker
@@ -174,7 +174,7 @@ This patches environment files (like `container.env` or `.env`) that are used by
 ### With namespace override
 ```yaml
 - name: Update for feature branch
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/feature
     image: app
@@ -242,7 +242,7 @@ Provide either `images_json` OR `image` (with or without tag), not both. The act
 
 ```yaml
 - name: Update app and migrator images
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     images_json: |
@@ -254,7 +254,7 @@ Provide either `images_json` OR `image` (with or without tag), not both. The act
 
 ## How It Works
 
-This action is the **single source of truth** for image input handling in the KoalaOps action ecosystem. It:
+This action is the **single source of truth** for image input handling in the Skyhook action ecosystem. It:
 
 1. **Validates and normalizes** all image input formats (embedded tag, separate params, or multi-image JSON)
 2. **Modifies** `kustomization.yaml` using kustomize CLI commands
@@ -291,7 +291,7 @@ commonAnnotations:
 
 ## Environment File Patching
 
-The `env_patches` input integrates with [KoalaOps/patch-env-files](https://github.com/KoalaOps/patch-env-files) to update environment files used by Kustomize's `configMapGenerator`.
+The `env_patches` input integrates with [skyhook-io/patch-env-files](https://github.com/skyhook-io/patch-env-files) to update environment files used by Kustomize's `configMapGenerator`.
 
 ### How it works
 
@@ -305,7 +305,7 @@ configMapGenerator:
 
 You can patch `container.env` with runtime values:
 ```yaml
-- uses: KoalaOps/kustomize-edit@v1
+- uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     env_patches: |
@@ -336,7 +336,7 @@ The action supports both simple image names and full registry paths. This is use
 ```yaml
 # Simple image name (uses default registry)
 - name: Update from Docker Hub
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     image: nginx
@@ -344,7 +344,7 @@ The action supports both simple image names and full registry paths. This is use
 
 # Full registry path for Google Container Registry
 - name: Update from GCR
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     image: gcr.io/my-project/backend
@@ -352,7 +352,7 @@ The action supports both simple image names and full registry paths. This is use
 
 # Private registry example
 - name: Update from private registry
-  uses: KoalaOps/kustomize-edit@v1
+  uses: skyhook-io/kustomize-edit@v1
   with:
     overlay_dir: deploy/overlays/production
     image: registry.company.com/team/api-service

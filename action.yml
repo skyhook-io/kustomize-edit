@@ -1,6 +1,6 @@
 name: 'Kustomize Edit'
 description: 'Edit kustomize overlays - set images, labels, annotations, name/namespace, replicas, ConfigMap values'
-author: 'KoalaOps'
+author: 'Skyhook'
 
 branding:
   icon: 'edit'
@@ -102,7 +102,7 @@ runs:
 
     - name: Patch environment files
       if: inputs.env_patches != ''
-      uses: KoalaOps/patch-env-files@v1
+      uses: skyhook-io/patch-env-files@v1
       with:
         path: ${{ inputs.overlay_dir }}
         patches: ${{ inputs.env_patches }}
