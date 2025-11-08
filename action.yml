@@ -1,4 +1,4 @@
-name: 'Kustomize Edit'
+name: 'Skyhook Kustomize Edit'
 description: 'Edit kustomize overlays - set images, labels, annotations, name/namespace, replicas, ConfigMap values'
 author: 'Skyhook'
 
