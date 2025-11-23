@@ -1,0 +1,149 @@
+name: Test Action
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Create test kustomization
+        run: |
+          mkdir -p test-overlay
+          cat > test-overlay/kustomization.yaml << 'EOF'
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          resources:
+            - deployment.yaml
+          EOF
+
+          cat > test-overlay/deployment.yaml << 'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: test-app
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: test-app
+            template:
+              metadata:
+                labels:
+                  app: test-app
+              spec:
+                containers:
+                  - name: test
+                    image: nginx:latest
+          EOF
+
+      - name: Run action - first time (creates label entry)
+        uses: ./
+        with:
+          overlay_dir: test-overlay
+          version_label: v1.0.0
+          debug: 'true'
+
+      - name: Verify first run
+        run: |
+          echo "=== Kustomization after first run ==="
+          cat test-overlay/kustomization.yaml
+
+          # Check that version label exists
+          VERSION=$(yq '.labels[] | select(.pairs."app.kubernetes.io/version") | .pairs."app.kubernetes.io/version"' test-overlay/kustomization.yaml)
+          if [ "$VERSION" != "v1.0.0" ]; then
+            echo "ERROR: Expected version v1.0.0, got: $VERSION"
+            exit 1
+          fi
+
+          # Check includeTemplates is true
+          INCLUDE_TEMPLATES=$(yq '.labels[] | select(.pairs."app.kubernetes.io/version") | .includeTemplates' test-overlay/kustomization.yaml)
+          if [ "$INCLUDE_TEMPLATES" != "true" ]; then
+            echo "ERROR: Expected includeTemplates=true, got: $INCLUDE_TEMPLATES"
+            exit 1
+          fi
+
+          echo "✅ First run passed"
+
+      - name: Run action - second time (updates existing entry)
+        uses: ./
+        with:
+          overlay_dir: test-overlay
+          version_label: v2.0.0
+          debug: 'true'
+
+      - name: Verify second run - no accumulation
+        run: |
+          echo "=== Kustomization after second run ==="
+          cat test-overlay/kustomization.yaml
+
+          # Count entries with version label - should be exactly 1
+          COUNT=$(yq '[.labels[] | select(.pairs."app.kubernetes.io/version")] | length' test-overlay/kustomization.yaml)
+          if [ "$COUNT" != "1" ]; then
+            echo "ERROR: Expected 1 version label entry, got: $COUNT (accumulation bug!)"
+            exit 1
+          fi
+
+          # Check version was updated
+          VERSION=$(yq '.labels[] | select(.pairs."app.kubernetes.io/version") | .pairs."app.kubernetes.io/version"' test-overlay/kustomization.yaml)
+          if [ "$VERSION" != "v2.0.0" ]; then
+            echo "ERROR: Expected version v2.0.0, got: $VERSION"
+            exit 1
+          fi
+
+          echo "✅ Second run passed - no accumulation"
+
+      - name: Run action - third time (verify still no accumulation)
+        uses: ./
+        with:
+          overlay_dir: test-overlay
+          version_label: v3.0.0
+          debug: 'true'
+
+      - name: Verify third run
+        run: |
+          echo "=== Kustomization after third run ==="
+          cat test-overlay/kustomization.yaml
+
+          # Count entries - still should be 1
+          COUNT=$(yq '[.labels[] | select(.pairs."app.kubernetes.io/version")] | length' test-overlay/kustomization.yaml)
+          if [ "$COUNT" != "1" ]; then
+            echo "ERROR: Expected 1 version label entry, got: $COUNT (accumulation bug!)"
+            exit 1
+          fi
+
+          # Check version was updated
+          VERSION=$(yq '.labels[] | select(.pairs."app.kubernetes.io/version") | .pairs."app.kubernetes.io/version"' test-overlay/kustomization.yaml)
+          if [ "$VERSION" != "v3.0.0" ]; then
+            echo "ERROR: Expected version v3.0.0, got: $VERSION"
+            exit 1
+          fi
+
+          # Verify includeSelectors is false
+          INCLUDE_SELECTORS=$(yq '.labels[] | select(.pairs."app.kubernetes.io/version") | .includeSelectors' test-overlay/kustomization.yaml)
+          if [ "$INCLUDE_SELECTORS" != "false" ]; then
+            echo "ERROR: Expected includeSelectors=false, got: $INCLUDE_SELECTORS"
+            exit 1
+          fi
+
+          echo "✅ Third run passed - all checks passed"
+          echo ""
+          echo "=== Final kustomization.yaml ==="
+          cat test-overlay/kustomization.yaml

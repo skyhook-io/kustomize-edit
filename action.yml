@@ -240,12 +240,14 @@ runs:
         # 1) Remove any old commonLabels version to avoid selector contamination
         yq -i 'del(.commonLabels."app.kubernetes.io/version")' kustomization.yaml 2>/dev/null || true
 
-        # 2) Merge into an existing templates-only labels entry, or create one
-        if yq -e '.labels[] | select(.includeTemplates == true and .includeSelectors == false)' kustomization.yaml >/dev/null 2>&1; then
-          # Update existing templates-only entry
-          yq -i '(.labels[] | select(.includeTemplates == true and .includeSelectors == false)).pairs."app.kubernetes.io/version" = env(VERSION_LABEL)' kustomization.yaml
+        # 2) Update existing entry or create new one
+        if yq -e '.labels[] | select(.pairs."app.kubernetes.io/version")' kustomization.yaml >/dev/null 2>&1; then
+          # Update existing entry and ensure correct settings
+          yq -i '(.labels[] | select(.pairs."app.kubernetes.io/version")).pairs."app.kubernetes.io/version" = env(VERSION_LABEL)' kustomization.yaml
+          yq -i '(.labels[] | select(.pairs."app.kubernetes.io/version")).includeTemplates = true' kustomization.yaml
+          yq -i '(.labels[] | select(.pairs."app.kubernetes.io/version")).includeSelectors = false' kustomization.yaml
         else
-          # Add new templates-only entry
+          # Add new entry with correct settings
           yq -i '.labels += [{"pairs": {"app.kubernetes.io/version": env(VERSION_LABEL)}, "includeSelectors": false, "includeTemplates": true}]' kustomization.yaml
         fi
 
@@ -359,8 +361,9 @@ runs:
         if [ -n "${{ inputs.version_label }}" ]; then
           echo "🔍 Checking selectors don't contain version label..."
           MANIFESTS=$(kustomize build .)
-          if echo "$MANIFESTS" | grep -A10 "kind: Deployment\|kind: StatefulSet\|kind: DaemonSet" | grep -B5 "selector:" | grep -q "app.kubernetes.io/version"; then
-            echo "::error::Version label found in selector (immutable field). This would cause deployment to fail."
+          # Use yq to check if any selector.matchLabels contains the version label
+          if echo "$MANIFESTS" | yq -e 'select(.spec.selector.matchLabels."app.kubernetes.io/version")' >/dev/null 2>&1; then
+            echo "::error::Version label found in selector.matchLabels (immutable field). This would cause deployment to fail."
             echo "::error::The version label should only be in pod templates, not selectors."
             exit 1
           fi
