@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  test-version-label:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -147,3 +147,159 @@ jobs:
           echo ""
           echo "=== Final kustomization.yaml ==="
           cat test-overlay/kustomization.yaml
+
+  test-newname-preservation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Create test kustomization with newName
+        run: |
+          mkdir -p test-overlay
+          cat > test-overlay/kustomization.yaml << 'EOF'
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          images:
+            - name: registry-mock.example.io/myapp
+              newName: 123456789.dkr.ecr.us-east-1.amazonaws.com/myapp
+              newTag: v1.0.0
+
+          resources:
+            - deployment.yaml
+          EOF
+
+          cat > test-overlay/deployment.yaml << 'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: test-app
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: test-app
+            template:
+              metadata:
+                labels:
+                  app: test-app
+              spec:
+                containers:
+                  - name: test
+                    image: registry-mock.example.io/myapp:latest
+          EOF
+
+      - name: Run action - update tag (should preserve newName)
+        uses: ./
+        with:
+          overlay_dir: test-overlay
+          image: registry-mock.example.io/myapp
+          tag: v2.0.0
+          debug: 'true'
+
+      - name: Verify newName was preserved
+        run: |
+          echo "=== Kustomization after update ==="
+          cat test-overlay/kustomization.yaml
+
+          # Check that newName is preserved
+          NEW_NAME=$(yq '.images[] | select(.name == "registry-mock.example.io/myapp") | .newName' test-overlay/kustomization.yaml)
+          if [ "$NEW_NAME" != "123456789.dkr.ecr.us-east-1.amazonaws.com/myapp" ]; then
+            echo "ERROR: newName was lost! Expected '123456789.dkr.ecr.us-east-1.amazonaws.com/myapp', got: '$NEW_NAME'"
+            exit 1
+          fi
+
+          # Check that newTag was updated
+          NEW_TAG=$(yq '.images[] | select(.name == "registry-mock.example.io/myapp") | .newTag' test-overlay/kustomization.yaml)
+          if [ "$NEW_TAG" != "v2.0.0" ]; then
+            echo "ERROR: newTag not updated! Expected 'v2.0.0', got: '$NEW_TAG'"
+            exit 1
+          fi
+
+          echo "✅ newName preserved and newTag updated correctly"
+
+  test-images-json-with-newname:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Create test kustomization
+        run: |
+          mkdir -p test-overlay
+          cat > test-overlay/kustomization.yaml << 'EOF'
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+
+          resources:
+            - deployment.yaml
+          EOF
+
+          cat > test-overlay/deployment.yaml << 'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: test-app
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: test-app
+            template:
+              metadata:
+                labels:
+                  app: test-app
+              spec:
+                containers:
+                  - name: test
+                    image: nginx:latest
+          EOF
+
+      - name: Run action with images_json including newName
+        uses: ./
+        with:
+          overlay_dir: test-overlay
+          images_json: '[{"name":"registry.example.io/app","newName":"mirror.example.io/app","newTag":"v1.0.0"}]'
+          debug: 'true'
+
+      - name: Verify images_json with newName
+        run: |
+          echo "=== Kustomization after images_json ==="
+          cat test-overlay/kustomization.yaml
+
+          # Check newName was set
+          NEW_NAME=$(yq '.images[] | select(.name == "registry.example.io/app") | .newName' test-overlay/kustomization.yaml)
+          if [ "$NEW_NAME" != "mirror.example.io/app" ]; then
+            echo "ERROR: newName not set! Expected 'mirror.example.io/app', got: '$NEW_NAME'"
+            exit 1
+          fi
+
+          # Check newTag was set
+          NEW_TAG=$(yq '.images[] | select(.name == "registry.example.io/app") | .newTag' test-overlay/kustomization.yaml)
+          if [ "$NEW_TAG" != "v1.0.0" ]; then
+            echo "ERROR: newTag not set! Expected 'v1.0.0', got: '$NEW_TAG'"
+            exit 1
+          fi
+
+          echo "✅ images_json with newName works correctly"
