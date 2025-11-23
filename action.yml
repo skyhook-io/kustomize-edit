@@ -21,7 +21,7 @@ inputs:
     description: 'Image tag (e.g., v1.2.3, latest, sha-abc123)'
     required: false
   images_json:
-    description: 'Multiple images as JSON array: [{"name":"registry.io/app","newTag":"v1.2.3"}]'
+    description: 'Multiple images as JSON array: [{"name":"registry.io/app","newName":"other.io/app","newTag":"v1.2.3"}]'
     required: false
   version_label:
     description: 'Value for app.kubernetes.io/version label'
@@ -180,6 +180,7 @@ runs:
           # Iterate through images and set each one
           echo '${{ inputs.images_json }}' | jq -c '.[]' | while read -r img; do
             NAME=$(echo "$img" | jq -r '.name // empty')
+            NEW_NAME=$(echo "$img" | jq -r '.newName // empty')
             NEW_TAG=$(echo "$img" | jq -r '.newTag // empty')
 
             if [ -z "$NAME" ]; then
@@ -192,7 +193,11 @@ runs:
               exit 1
             fi
 
-            kustomize edit set image "$NAME:$NEW_TAG"
+            if [ -n "$NEW_NAME" ]; then
+              kustomize edit set image "$NAME=$NEW_NAME:$NEW_TAG"
+            else
+              kustomize edit set image "$NAME:$NEW_TAG"
+            fi
           done
 
           echo "✅ Set $IMAGE_COUNT image(s): $IMAGE_SUMMARY"
@@ -201,8 +206,17 @@ runs:
         else
           NORM_IMAGE="${{ steps.normalize.outputs.normalized_image }}"
           NORM_TAG="${{ steps.normalize.outputs.normalized_tag }}"
-          kustomize edit set image "$NORM_IMAGE:$NORM_TAG"
-          echo "✅ Set image: $NORM_IMAGE:$NORM_TAG"
+
+          # Check if there's an existing newName for this image and preserve it
+          EXISTING_NEW_NAME=$(yq ".images[] | select(.name == \"$NORM_IMAGE\") | .newName // \"\"" kustomization.yaml 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_NEW_NAME" ]; then
+            kustomize edit set image "$NORM_IMAGE=$EXISTING_NEW_NAME:$NORM_TAG"
+            echo "✅ Set image: $NORM_IMAGE → $EXISTING_NEW_NAME:$NORM_TAG"
+          else
+            kustomize edit set image "$NORM_IMAGE:$NORM_TAG"
+            echo "✅ Set image: $NORM_IMAGE:$NORM_TAG"
+          fi
         fi
     
     - name: Set version label
