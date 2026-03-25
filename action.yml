@@ -163,6 +163,31 @@ runs:
       run: |
         set -euo pipefail
 
+        # Helper: patch a single image entry using yq (PATCH semantics)
+        yq_set_image() {
+          local name="$1" new_tag="$2" new_name="${3:-}"
+
+          export YQ_IMG_NAME="$name"
+          export YQ_IMG_TAG="$new_tag"
+
+          if yq -e ".images[] | select(.name == env(YQ_IMG_NAME))" kustomization.yaml >/dev/null 2>&1; then
+            # Entry exists — patch only provided fields
+            yq -i '(.images[] | select(.name == env(YQ_IMG_NAME))).newTag = env(YQ_IMG_TAG)' kustomization.yaml
+            if [ -n "$new_name" ]; then
+              export YQ_IMG_NEWNAME="$new_name"
+              yq -i '(.images[] | select(.name == env(YQ_IMG_NAME))).newName = env(YQ_IMG_NEWNAME)' kustomization.yaml
+            fi
+          else
+            # Entry doesn't exist — append
+            if [ -n "$new_name" ]; then
+              export YQ_IMG_NEWNAME="$new_name"
+              yq -i '.images += [{"name": env(YQ_IMG_NAME), "newName": env(YQ_IMG_NEWNAME), "newTag": env(YQ_IMG_TAG)}]' kustomization.yaml
+            else
+              yq -i '.images += [{"name": env(YQ_IMG_NAME), "newTag": env(YQ_IMG_TAG)}]' kustomization.yaml
+            fi
+          fi
+        }
+
         # Process images_json
         if [ -n "${{ inputs.images_json }}" ]; then
           # Validate JSON format
@@ -193,11 +218,7 @@ runs:
               exit 1
             fi
 
-            if [ -n "$NEW_NAME" ]; then
-              kustomize edit set image "$NAME=$NEW_NAME:$NEW_TAG"
-            else
-              kustomize edit set image "$NAME:$NEW_TAG"
-            fi
+            yq_set_image "$NAME" "$NEW_TAG" "$NEW_NAME"
           done
 
           echo "✅ Set $IMAGE_COUNT image(s): $IMAGE_SUMMARY"
@@ -207,16 +228,8 @@ runs:
           NORM_IMAGE="${{ steps.normalize.outputs.normalized_image }}"
           NORM_TAG="${{ steps.normalize.outputs.normalized_tag }}"
 
-          # Check if there's an existing newName for this image and preserve it
-          EXISTING_NEW_NAME=$(yq ".images[] | select(.name == \"$NORM_IMAGE\") | .newName // \"\"" kustomization.yaml 2>/dev/null || echo "")
-
-          if [ -n "$EXISTING_NEW_NAME" ]; then
-            kustomize edit set image "$NORM_IMAGE=$EXISTING_NEW_NAME:$NORM_TAG"
-            echo "✅ Set image: $NORM_IMAGE → $EXISTING_NEW_NAME:$NORM_TAG"
-          else
-            kustomize edit set image "$NORM_IMAGE:$NORM_TAG"
-            echo "✅ Set image: $NORM_IMAGE:$NORM_TAG"
-          fi
+          yq_set_image "$NORM_IMAGE" "$NORM_TAG"
+          echo "✅ Set image: $NORM_IMAGE:$NORM_TAG"
         fi
     
     - name: Set version label
