@@ -47,6 +47,14 @@ inputs:
   env_patches:
     description: 'Environment file patches (JSON format matching patch-env-files, e.g., {"container.env":{"SENTRY_RELEASE":"v1.2.3"}})'
     required: false
+  environment_values_file:
+    description: 'Name of the environment values file to read from the overlay directory'
+    required: false
+    default: 'environment-values.env'
+  patch_prefix:
+    description: 'Prefix for generated patch files. Defaults to a random prefix to avoid collisions.'
+    required: false
+    default: ''
 
 outputs:
   overlay_dir:
@@ -55,6 +63,12 @@ outputs:
   kustomization_file:
     description: 'Path to kustomization.yaml'
     value: ${{ inputs.overlay_dir }}/kustomization.yaml
+  applied_environment_keys:
+    description: 'Comma-separated list of environment value keys that were applied'
+    value: ${{ steps.env_values.outputs.applied_keys }}
+  skipped_environment_keys:
+    description: 'Comma-separated list of unrecognized environment value keys'
+    value: ${{ steps.env_values.outputs.skipped_keys }}
 
 runs:
   using: 'composite'
@@ -77,9 +91,9 @@ runs:
           exit 1
         fi
 
-        # Check for yq (needed for version_label)
-        if [ -n "${{ inputs.version_label }}" ] && ! command -v yq >/dev/null 2>&1; then
-          echo "::warning::yq not found. Will be installed automatically if version_label is used."
+        # Check for yq (needed for version_label, environment values, etc.)
+        if ! command -v yq >/dev/null 2>&1; then
+          echo "::warning::yq not found. Will be installed automatically if needed."
         fi
 
         echo "✅ Required tools available"
@@ -106,6 +120,283 @@ runs:
       with:
         path: ${{ inputs.overlay_dir }}
         patches: ${{ inputs.env_patches }}
+
+    - name: Apply environment values
+      id: env_values
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        OVERLAY_DIR="${{ inputs.overlay_dir }}"
+        ENV_FILE_NAME="${{ inputs.environment_values_file }}"
+        ENV_FILE_PATH="${OVERLAY_DIR}/${ENV_FILE_NAME}"
+        PREFIX="${{ inputs.patch_prefix }}"
+
+        # Resolve prefix
+        if [ -z "$PREFIX" ]; then
+          PREFIX="skyhook-$(openssl rand -hex 4)-"
+        fi
+
+        # Phase 1: Read env file
+        if [ ! -f "$ENV_FILE_PATH" ]; then
+          echo "ℹ️ No environment values file found at ${ENV_FILE_PATH}, skipping"
+          echo "applied_keys=" >> $GITHUB_OUTPUT
+          echo "skipped_keys=" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # Parse env file into a temp file (key=value lines, comments/blanks/malformed stripped)
+        ENV_PARSED=$(mktemp)
+        while IFS= read -r line || [ -n "$line" ]; do
+          line="$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
+          [[ -z "$line" || "$line" == \#* ]] && continue
+          # Skip lines without = (malformed)
+          if [[ "$line" != *"="* ]]; then
+            echo "⚠️ Skipping malformed line (no '='): $line"
+            continue
+          fi
+          # Skip lines with empty key (e.g., "=value")
+          _key="${line%%=*}"
+          if [ -z "$_key" ]; then
+            echo "⚠️ Skipping line with empty key: $line"
+            continue
+          fi
+          echo "$line" >> "$ENV_PARSED"
+        done < "$ENV_FILE_PATH"
+
+        ENV_KEY_COUNT=$(wc -l < "$ENV_PARSED" | tr -d ' ')
+        if [ "$ENV_KEY_COUNT" = "0" ]; then
+          echo "ℹ️ No keys found in ${ENV_FILE_PATH}, skipping"
+          echo "applied_keys=" >> $GITHUB_OUTPUT
+          echo "skipped_keys=" >> $GITHUB_OUTPUT
+          rm -f "$ENV_PARSED"
+          exit 0
+        fi
+
+        echo "📋 Found ${ENV_KEY_COUNT} key(s) in ${ENV_FILE_PATH}"
+
+        # Phase 2: Idempotency cleanup
+        cd "$OVERLAY_DIR"
+        if [ -z "$PREFIX" ]; then
+          echo "::error::Internal error: patch prefix is empty"
+          exit 1
+        fi
+        rm -f ${PREFIX}*.yaml
+        export YQ_PREFIX="$PREFIX"
+        if yq -e '.patches' kustomization.yaml >/dev/null 2>&1; then
+          yq -i 'del(.patches[] | select(.path | test("^" + env(YQ_PREFIX))))' kustomization.yaml 2>/dev/null || true
+          PATCH_COUNT=$(yq '.patches | length' kustomization.yaml 2>/dev/null || echo "0")
+          if [ "$PATCH_COUNT" = "0" ]; then
+            yq -i 'del(.patches)' kustomization.yaml 2>/dev/null || true
+          fi
+        fi
+
+        # Phase 3: Resource discovery — store as lines in a file: kind|name|rule_count|has_tls|hosts|tls_hosts
+        RESOURCES_FILE=$(mktemp)
+
+        BUILD_OUTPUT=$(kustomize build . 2>/dev/null || echo "")
+        if [ -n "$BUILD_OUTPUT" ]; then
+          TEMP_DIR=$(mktemp -d)
+          echo "$BUILD_OUTPUT" | yq -s "\"${TEMP_DIR}/doc_\" + \$index" 2>/dev/null || true
+          for doc_file in "$TEMP_DIR"/doc_*; do
+            [ -f "$doc_file" ] || continue
+            kind=$(yq '.kind // ""' "$doc_file")
+            name=$(yq '.metadata.name // ""' "$doc_file")
+            if [ "$kind" = "Ingress" ]; then
+              rule_count=$(yq '.spec.rules | length' "$doc_file")
+              has_tls=$(yq 'select(.spec.tls) | .spec.tls | length > 0' "$doc_file" 2>/dev/null || echo "false")
+              [ -z "$has_tls" ] && has_tls="false"
+              hosts=$(yq -r '[.spec.rules[].host] | join(",")' "$doc_file")
+              tls_hosts=$(yq -r '[.spec.tls[].hosts[]] | join(",")' "$doc_file" 2>/dev/null || echo "")
+              echo "Ingress|${name}|${rule_count}|${has_tls}|${hosts}|${tls_hosts}" >> "$RESOURCES_FILE"
+            elif [ "$kind" = "HTTPRoute" ]; then
+              hostnames=$(yq -r '[.spec.hostnames[]] | join(",")' "$doc_file")
+              hostname_count=$(yq '.spec.hostnames | length' "$doc_file")
+              echo "HTTPRoute|${name}|${hostname_count}|false|${hostnames}|" >> "$RESOURCES_FILE"
+            fi
+          done
+          rm -rf "$TEMP_DIR"
+        fi
+
+        # Strategy B: recursive file scan (fallback if kustomize build found nothing)
+        RESOURCE_COUNT=$(wc -l < "$RESOURCES_FILE" | tr -d ' ')
+        if [ "$RESOURCE_COUNT" = "0" ]; then
+          echo "🔍 kustomize build found no Ingress/HTTPRoute, trying file scan..."
+          scan_yaml_files() {
+            local dir="$1"
+            local kfile="$dir/kustomization.yaml"
+            [ -f "$kfile" ] || return 0
+            for field in resources components bases; do
+              local paths
+              paths=$(yq ".$field // [] | .[]" "$kfile" 2>/dev/null || true)
+              while IFS= read -r p; do
+                [ -z "$p" ] && continue
+                local full_path="$dir/$p"
+                if [ -d "$full_path" ]; then
+                  scan_yaml_files "$full_path"
+                elif [ -f "$full_path" ]; then
+                  local fkind fname
+                  fkind=$(yq '.kind // ""' "$full_path" 2>/dev/null || echo "")
+                  fname=$(yq '.metadata.name // ""' "$full_path" 2>/dev/null || echo "")
+                  if [ "$fkind" = "Ingress" ]; then
+                    local frule_count fhas_tls fhosts ftls_hosts
+                    frule_count=$(yq '.spec.rules | length' "$full_path")
+                    fhas_tls=$(yq 'select(.spec.tls) | .spec.tls | length > 0' "$full_path" 2>/dev/null || echo "false")
+                    [ -z "$fhas_tls" ] && fhas_tls="false"
+                    fhosts=$(yq -r '[.spec.rules[].host] | join(",")' "$full_path")
+                    ftls_hosts=$(yq -r '[.spec.tls[].hosts[]] | join(",")' "$full_path" 2>/dev/null || echo "")
+                    echo "Ingress|${fname}|${frule_count}|${fhas_tls}|${fhosts}|${ftls_hosts}" >> "$RESOURCES_FILE"
+                  elif [ "$fkind" = "HTTPRoute" ]; then
+                    local fhostnames fhostname_count
+                    fhostnames=$(yq -r '[.spec.hostnames[]] | join(",")' "$full_path")
+                    fhostname_count=$(yq '.spec.hostnames | length' "$full_path")
+                    echo "HTTPRoute|${fname}|${fhostname_count}|false|${fhostnames}|" >> "$RESOURCES_FILE"
+                  fi
+                fi
+              done <<< "$paths"
+            done
+          }
+          scan_yaml_files "."
+        fi
+
+        RESOURCE_COUNT=$(wc -l < "$RESOURCES_FILE" | tr -d ' ')
+        echo "🔍 Discovered ${RESOURCE_COUNT} resource(s)"
+        cat "$RESOURCES_FILE" | while IFS= read -r line; do echo "  - $line"; done
+
+        # Helper: look up a host mapping from a mappings file
+        lookup_host_mapping() {
+          local host="$1" mappings_file="$2"
+          grep "^${host}=" "$mappings_file" 2>/dev/null | head -1 | cut -d= -f2-
+        }
+
+        # Phase 4: Key handlers
+        APPLIED_KEYS=""
+        SKIPPED_KEYS=""
+
+        while IFS= read -r env_line || [ -n "$env_line" ]; do
+          key="${env_line%%=*}"
+          value="${env_line#*=}"
+
+          case "$key" in
+            EXTERNAL_HOST)
+              echo "🌐 Processing EXTERNAL_HOST=${value}"
+
+              # Detect mode: mapping vs simple
+              MAPPING_MODE=false
+              SIMPLE_HOST=""
+              MAPPINGS_FILE=""
+              if [[ "$value" == *"->"* ]]; then
+                MAPPING_MODE=true
+                MAPPINGS_FILE=$(mktemp)
+                # Parse old->new pairs into a file: old=new per line
+                IFS=',' read -ra PAIRS <<< "$value"
+                for pair in "${PAIRS[@]}"; do
+                  old_host="${pair%%->*}"
+                  new_host="${pair#*->}"
+                  echo "${old_host}=${new_host}" >> "$MAPPINGS_FILE"
+                done
+              else
+                SIMPLE_HOST="$value"
+              fi
+
+              if [ "$RESOURCE_COUNT" = "0" ]; then
+                echo "  ⚠️ No Ingress/HTTPRoute resources found, nothing to patch"
+              fi
+
+              while IFS='|' read -r kind name count has_tls hosts tls_hosts; do
+                [ -z "$kind" ] && continue
+
+                if [ "$kind" = "Ingress" ]; then
+                  PATCH_FILE="${PREFIX}ingress-${name}.yaml"
+                  OPS="[]"
+
+                  IFS=',' read -ra HOST_ARRAY <<< "$hosts"
+                  idx=0
+                  for current_host in "${HOST_ARRAY[@]}"; do
+                    if [ "$MAPPING_MODE" = true ]; then
+                      mapped=$(lookup_host_mapping "$current_host" "$MAPPINGS_FILE")
+                      if [ -n "$mapped" ]; then
+                        OPS=$(echo "$OPS" | jq --arg path "/spec/rules/$idx/host" --arg val "$mapped" '. + [{"op":"replace","path":$path,"value":$val}]')
+                      fi
+                    else
+                      OPS=$(echo "$OPS" | jq --arg path "/spec/rules/$idx/host" --arg val "$SIMPLE_HOST" '. + [{"op":"replace","path":$path,"value":$val}]')
+                    fi
+                    idx=$((idx + 1))
+                  done
+
+                  if [ "$has_tls" = "true" ] && [ -n "$tls_hosts" ]; then
+                    IFS=',' read -ra TLS_HOST_ARRAY <<< "$tls_hosts"
+                    tls_idx=0
+                    for current_host in "${TLS_HOST_ARRAY[@]}"; do
+                      if [ "$MAPPING_MODE" = true ]; then
+                        mapped=$(lookup_host_mapping "$current_host" "$MAPPINGS_FILE")
+                        if [ -n "$mapped" ]; then
+                          OPS=$(echo "$OPS" | jq --arg path "/spec/tls/0/hosts/$tls_idx" --arg val "$mapped" '. + [{"op":"replace","path":$path,"value":$val}]')
+                        fi
+                      else
+                        OPS=$(echo "$OPS" | jq --arg path "/spec/tls/0/hosts/$tls_idx" --arg val "$SIMPLE_HOST" '. + [{"op":"replace","path":$path,"value":$val}]')
+                      fi
+                      tls_idx=$((tls_idx + 1))
+                    done
+                  fi
+
+                  if [ "$(echo "$OPS" | jq 'length')" -gt 0 ]; then
+                    echo "$OPS" | yq -P '.' > "$PATCH_FILE"
+                    echo "  ✅ Generated $PATCH_FILE"
+                    export YQ_PATCH_PATH="$PATCH_FILE"
+                    export YQ_TARGET_KIND="Ingress"
+                    export YQ_TARGET_NAME="$name"
+                    yq -i '.patches += [{"path": env(YQ_PATCH_PATH), "target": {"kind": env(YQ_TARGET_KIND), "name": env(YQ_TARGET_NAME)}}]' kustomization.yaml
+                  fi
+
+                elif [ "$kind" = "HTTPRoute" ]; then
+                  PATCH_FILE="${PREFIX}httproute-${name}.yaml"
+                  if [ "$MAPPING_MODE" = true ]; then
+                    OPS="[]"
+                    IFS=',' read -ra HOST_ARRAY <<< "$hosts"
+                    idx=0
+                    for current_host in "${HOST_ARRAY[@]}"; do
+                      mapped=$(lookup_host_mapping "$current_host" "$MAPPINGS_FILE")
+                      if [ -n "$mapped" ]; then
+                        OPS=$(echo "$OPS" | jq --arg path "/spec/hostnames/$idx" --arg val "$mapped" '. + [{"op":"replace","path":$path,"value":$val}]')
+                      fi
+                      idx=$((idx + 1))
+                    done
+                    if [ "$(echo "$OPS" | jq 'length')" -gt 0 ]; then
+                      echo "$OPS" | yq -P '.' > "$PATCH_FILE"
+                      echo "  ✅ Generated $PATCH_FILE"
+                      export YQ_PATCH_PATH="$PATCH_FILE"
+                      export YQ_TARGET_KIND="HTTPRoute"
+                      export YQ_TARGET_NAME="$name"
+                      yq -i '.patches += [{"path": env(YQ_PATCH_PATH), "target": {"kind": env(YQ_TARGET_KIND), "name": env(YQ_TARGET_NAME)}}]' kustomization.yaml
+                    fi
+                  else
+                    printf 'apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: %s\nspec:\n  hostnames:\n  - %s\n' "$name" "$SIMPLE_HOST" > "$PATCH_FILE"
+                    echo "  ✅ Generated $PATCH_FILE (strategic merge)"
+                    export YQ_PATCH_PATH="$PATCH_FILE"
+                    export YQ_TARGET_KIND="HTTPRoute"
+                    export YQ_TARGET_NAME="$name"
+                    yq -i '.patches += [{"path": env(YQ_PATCH_PATH), "target": {"kind": env(YQ_TARGET_KIND), "name": env(YQ_TARGET_NAME)}}]' kustomization.yaml
+                  fi
+                fi
+              done < "$RESOURCES_FILE"
+
+              [ -n "$MAPPINGS_FILE" ] && rm -f "$MAPPINGS_FILE"
+              APPLIED_KEYS="${APPLIED_KEYS:+${APPLIED_KEYS},}EXTERNAL_HOST"
+              ;;
+            *)
+              echo "⚠️ Unrecognized key: $key"
+              SKIPPED_KEYS="${SKIPPED_KEYS:+${SKIPPED_KEYS},}$key"
+              ;;
+          esac
+        done < "$ENV_PARSED"
+
+        rm -f "$ENV_PARSED" "$RESOURCES_FILE"
+
+        # Phase 5: Outputs
+        echo "applied_keys=$APPLIED_KEYS" >> $GITHUB_OUTPUT
+        echo "skipped_keys=$SKIPPED_KEYS" >> $GITHUB_OUTPUT
+        echo "✅ Environment values applied. Applied: [${APPLIED_KEYS}] Skipped: [${SKIPPED_KEYS}]"
 
     - name: Normalize image inputs
       id: normalize
