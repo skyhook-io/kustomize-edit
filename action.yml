@@ -47,15 +47,6 @@ inputs:
   env_patches:
     description: 'Environment file patches (JSON format matching patch-env-files, e.g., {"container.env":{"SENTRY_RELEASE":"v1.2.3"}})'
     required: false
-  environment_values_file:
-    description: 'Name of the environment values file to read from the overlay directory'
-    required: false
-    default: 'environment-values.env'
-  patch_prefix:
-    description: 'Prefix for generated patch files. Defaults to a random prefix to avoid collisions.'
-    required: false
-    default: ''
-
 outputs:
   overlay_dir:
     description: 'Path to the edited overlay'
@@ -63,13 +54,6 @@ outputs:
   kustomization_file:
     description: 'Path to kustomization.yaml'
     value: ${{ inputs.overlay_dir }}/kustomization.yaml
-  applied_environment_keys:
-    description: 'Comma-separated list of environment value keys that were applied'
-    value: ${{ steps.env_values.outputs.applied_keys }}
-  skipped_environment_keys:
-    description: 'Comma-separated list of unrecognized environment value keys'
-    value: ${{ steps.env_values.outputs.skipped_keys }}
-
 runs:
   using: 'composite'
   steps:
@@ -128,14 +112,9 @@ runs:
         set -euo pipefail
 
         OVERLAY_DIR="${{ inputs.overlay_dir }}"
-        ENV_FILE_NAME="${{ inputs.environment_values_file }}"
+        ENV_FILE_NAME="environment-values.env"
         ENV_FILE_PATH="${OVERLAY_DIR}/${ENV_FILE_NAME}"
-        PREFIX="${{ inputs.patch_prefix }}"
-
-        # Resolve prefix
-        if [ -z "$PREFIX" ]; then
-          PREFIX="skyhook-$(openssl rand -hex 4)-"
-        fi
+        PREFIX="skyhook-"
 
         # Phase 1: Read env file
         if [ ! -f "$ENV_FILE_PATH" ]; then

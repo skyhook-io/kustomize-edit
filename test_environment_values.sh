@@ -106,8 +106,6 @@ lookup_host_mapping() {
 
 apply_environment_values() {
   local overlay_dir="$1"
-  local env_file="${2:-environment-values.env}"
-  local prefix="${3:-}"
 
   # Redirect GITHUB_OUTPUT to a temp file for testing
   local github_output="$TMPDIR/github_output_$$_${TESTS}"
@@ -118,13 +116,9 @@ apply_environment_values() {
     set -euo pipefail
 
     OVERLAY_DIR="$overlay_dir"
-    ENV_FILE_NAME="$env_file"
+    ENV_FILE_NAME="environment-values.env"
     ENV_FILE_PATH="${OVERLAY_DIR}/${ENV_FILE_NAME}"
-    PREFIX="$prefix"
-
-    if [ -z "$PREFIX" ]; then
-      PREFIX="skyhook-$(openssl rand -hex 4)-"
-    fi
+    PREFIX="skyhook-"
 
     if [ ! -f "$ENV_FILE_PATH" ]; then
       echo "applied_keys=" >> "$GITHUB_OUTPUT"
@@ -384,19 +378,19 @@ echo "=============================="
 echo ""
 echo "=== Test 1: Single-rule Ingress — host replaced ==="
 DIR=$(setup_fixture "ingress-single-rule")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 BUILD=$(cd "$DIR" && kustomize build .)
 INGRESS_HOST=$(echo "$BUILD" | yq 'select(.kind == "Ingress") | .spec.rules[0].host')
 assert_eq "host replaced" "preview.myorg.dev" "$INGRESS_HOST"
 assert_eq "applied keys" "EXTERNAL_HOST" "$LAST_APPLIED_KEYS"
-assert_file_exists "patch file created" "$DIR/test-ingress-my-app.yaml"
+assert_file_exists "patch file created" "$DIR/skyhook-ingress-my-app.yaml"
 
 # ----------------------------------------------------------
 echo ""
 echo "=== Test 2: Multi-rule Ingress — all rules patched ==="
 DIR=$(setup_fixture "ingress-multi-rule")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 BUILD=$(cd "$DIR" && kustomize build .)
 HOST0=$(echo "$BUILD" | yq 'select(.kind == "Ingress") | .spec.rules[0].host')
@@ -408,7 +402,7 @@ assert_eq "rule 1 host replaced" "preview.myorg.dev" "$HOST1"
 echo ""
 echo "=== Test 3: Ingress with TLS — both rules and tls patched ==="
 DIR=$(setup_fixture "ingress-with-tls")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 BUILD=$(cd "$DIR" && kustomize build .)
 RULE_HOST=$(echo "$BUILD" | yq 'select(.kind == "Ingress") | .spec.rules[0].host')
@@ -420,7 +414,7 @@ assert_eq "tls host replaced" "preview.myorg.dev" "$TLS_HOST"
 echo ""
 echo "=== Test 4: HTTPRoute — all hostnames replaced ==="
 DIR=$(setup_fixture "httproute")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 BUILD=$(cd "$DIR" && kustomize build .)
 HOSTNAME0=$(echo "$BUILD" | yq 'select(.kind == "HTTPRoute") | .spec.hostnames[0]')
@@ -433,7 +427,7 @@ assert_eq "hostname count is 1 (strategic merge)" "1" "$HOSTNAME_COUNT"
 echo ""
 echo "=== Test 5: Both Ingress + HTTPRoute — both patched ==="
 DIR=$(setup_fixture "both-ingress-httproute")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 BUILD=$(cd "$DIR" && kustomize build .)
 INGRESS_HOST=$(echo "$BUILD" | yq 'select(.kind == "Ingress") | .spec.rules[0].host')
@@ -445,7 +439,7 @@ assert_eq "httproute hostname replaced" "preview.myorg.dev" "$HTTPROUTE_HOST"
 echo ""
 echo "=== Test 6: Mapping mode — only matching hosts changed ==="
 DIR=$(setup_fixture "mapping-mode")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 BUILD=$(cd "$DIR" && kustomize build .)
 HOST0=$(echo "$BUILD" | yq 'select(.kind == "Ingress") | .spec.rules[0].host')
@@ -457,21 +451,21 @@ assert_eq "web host mapped" "web.preview.com" "$HOST1"
 echo ""
 echo "=== Test 7: Multiple Ingress resources — each gets own patch ==="
 DIR=$(setup_fixture "multiple-ingress")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 BUILD=$(cd "$DIR" && kustomize build .)
 API_HOST=$(echo "$BUILD" | yq 'select(.kind == "Ingress" and .metadata.name == "api") | .spec.rules[0].host')
 WEB_HOST=$(echo "$BUILD" | yq 'select(.kind == "Ingress" and .metadata.name == "web") | .spec.rules[0].host')
 assert_eq "api ingress host replaced" "preview.myorg.dev" "$API_HOST"
 assert_eq "web ingress host replaced" "preview.myorg.dev" "$WEB_HOST"
-assert_file_exists "api patch file" "$DIR/test-ingress-api.yaml"
-assert_file_exists "web patch file" "$DIR/test-ingress-web.yaml"
+assert_file_exists "api patch file" "$DIR/skyhook-ingress-api.yaml"
+assert_file_exists "web patch file" "$DIR/skyhook-ingress-web.yaml"
 
 # ----------------------------------------------------------
 echo ""
 echo "=== Test 8: No Ingress/HTTPRoute — warning, no failure, key applied ==="
 DIR=$(setup_fixture "no-resources")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -481,11 +475,11 @@ assert_eq "applied keys includes EXTERNAL_HOST" "EXTERNAL_HOST" "$LAST_APPLIED_K
 echo ""
 echo "=== Test 9: Idempotency — run twice, kustomize build identical ==="
 DIR=$(setup_fixture "ingress-single-rule")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 BUILD1=$(cd "$DIR" && kustomize build .)
 
 # Run again with same prefix
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 BUILD2=$(cd "$DIR" && kustomize build .)
 
 assert_eq "builds identical" "$BUILD1" "$BUILD2"
@@ -498,7 +492,7 @@ echo ""
 echo "=== Test 10: Unrecognized key — in skipped_keys ==="
 DIR=$(setup_fixture "ingress-single-rule")
 echo "UNKNOWN_KEY=somevalue" >> "$DIR/environment-values.env"
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 assert_contains "applied contains EXTERNAL_HOST" "$LAST_APPLIED_KEYS" "EXTERNAL_HOST"
 assert_contains "skipped contains UNKNOWN_KEY" "$LAST_SKIPPED_KEYS" "UNKNOWN_KEY"
@@ -507,7 +501,7 @@ assert_contains "skipped contains UNKNOWN_KEY" "$LAST_SKIPPED_KEYS" "UNKNOWN_KEY
 echo ""
 echo "=== Test 11: No env file — exits 0, empty outputs ==="
 DIR=$(setup_fixture "no-env-file")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -518,7 +512,7 @@ assert_eq "skipped keys empty" "" "$LAST_SKIPPED_KEYS"
 echo ""
 echo "=== Test 12: Empty env file — exits 0 ==="
 DIR=$(setup_fixture "empty-env-file")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -528,21 +522,20 @@ assert_eq "applied keys empty" "" "$LAST_APPLIED_KEYS"
 echo ""
 echo "=== Test 13: Patch files use correct prefix ==="
 DIR=$(setup_fixture "ingress-single-rule")
-apply_environment_values "$DIR" "environment-values.env" "myprefix-"
+apply_environment_values "$DIR"
 
-assert_file_exists "patch has correct prefix" "$DIR/myprefix-ingress-my-app.yaml"
-assert_file_not_exists "no test- prefix files" "$DIR/test-ingress-my-app.yaml"
+assert_file_exists "patch has skyhook- prefix" "$DIR/skyhook-ingress-my-app.yaml"
 
 # ----------------------------------------------------------
 echo ""
 echo "=== Test 14: kustomization.yaml patches list correct ==="
 DIR=$(setup_fixture "ingress-single-rule")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 PATCH_PATH=$(cd "$DIR" && yq '.patches[0].path' kustomization.yaml)
 PATCH_KIND=$(cd "$DIR" && yq '.patches[0].target.kind' kustomization.yaml)
 PATCH_NAME=$(cd "$DIR" && yq '.patches[0].target.name' kustomization.yaml)
-assert_eq "patch path" "test-ingress-my-app.yaml" "$PATCH_PATH"
+assert_eq "patch path" "skyhook-ingress-my-app.yaml" "$PATCH_PATH"
 assert_eq "patch target kind" "Ingress" "$PATCH_KIND"
 assert_eq "patch target name" "my-app" "$PATCH_NAME"
 
@@ -551,7 +544,7 @@ echo ""
 echo "=== Test 15: End-to-end kustomize build validates ==="
 for fixture in ingress-single-rule ingress-multi-rule ingress-with-tls httproute both-ingress-httproute mapping-mode multiple-ingress; do
   DIR=$(setup_fixture "$fixture")
-  apply_environment_values "$DIR" "environment-values.env" "test-"
+  apply_environment_values "$DIR"
   BUILD_OUTPUT=$(cd "$DIR" && kustomize build . 2>&1)
   BUILD_EXIT=$?
   assert_exit_code "kustomize build succeeds for $fixture" "0" "$BUILD_EXIT"
@@ -570,7 +563,7 @@ echo "=============================="
 echo ""
 echo "=== Test 16: Only unrecognized keys — no patches generated, no failure ==="
 DIR=$(setup_fixture "only-unrecognized-keys")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -590,7 +583,7 @@ assert_eq "original host unchanged" "app.example.com" "$ORIGINAL_HOST"
 echo ""
 echo "=== Test 17: Malformed lines — skipped gracefully, valid keys still work ==="
 DIR=$(setup_fixture "malformed-lines")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -606,7 +599,7 @@ assert_contains "skipped contains KEY_WITHOUT_VALUE" "$LAST_SKIPPED_KEYS" "KEY_W
 echo ""
 echo "=== Test 18: Existing patches preserved — user patches not removed ==="
 DIR=$(setup_fixture "existing-patches")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -614,8 +607,8 @@ assert_exit_code "exits 0" "0" "$EXIT"
 CUSTOM_PATCH=$(cd "$DIR" && yq '.patches[] | select(.path == "custom-patch.yaml") | .path' kustomization.yaml)
 assert_eq "custom patch preserved" "custom-patch.yaml" "$CUSTOM_PATCH"
 # Verify our patch was also added
-OUR_PATCH=$(cd "$DIR" && yq '.patches[] | select(.path == "test-ingress-my-app.yaml") | .path' kustomization.yaml)
-assert_eq "our patch added" "test-ingress-my-app.yaml" "$OUR_PATCH"
+OUR_PATCH=$(cd "$DIR" && yq '.patches[] | select(.path == "skyhook-ingress-my-app.yaml") | .path' kustomization.yaml)
+assert_eq "our patch added" "skyhook-ingress-my-app.yaml" "$OUR_PATCH"
 # Total patches should be 2 (custom + ours)
 TOTAL_PATCHES=$(cd "$DIR" && yq '.patches | length' kustomization.yaml)
 assert_eq "total patches is 2" "2" "$TOTAL_PATCHES"
@@ -628,7 +621,7 @@ assert_eq "host replaced" "preview.myorg.dev" "$HOST"
 echo ""
 echo "=== Test 19: Values with equals signs — parsed correctly ==="
 DIR=$(setup_fixture "values-with-equals")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -644,7 +637,7 @@ assert_eq "host replaced despite equals in values" "preview.myorg.dev" "$HOST"
 echo ""
 echo "=== Test 20: Existing kustomization fields preserved — images, namespace untouched ==="
 DIR=$(setup_fixture "existing-kustomization-no-patches")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 EXIT=$?
 
 assert_exit_code "exits 0" "0" "$EXIT"
@@ -662,9 +655,9 @@ assert_eq "host replaced" "preview.myorg.dev" "$HOST"
 echo ""
 echo "=== Test 21: Idempotency with existing patches — user patches survive re-runs ==="
 DIR=$(setup_fixture "existing-patches")
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 # Run a second time
-apply_environment_values "$DIR" "environment-values.env" "test-"
+apply_environment_values "$DIR"
 
 CUSTOM_PATCH=$(cd "$DIR" && yq '.patches[] | select(.path == "custom-patch.yaml") | .path' kustomization.yaml)
 assert_eq "custom patch still there after re-run" "custom-patch.yaml" "$CUSTOM_PATCH"
