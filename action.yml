@@ -1,419 +1,154 @@
-name: 'Skyhook Kustomize Edit'
-description: 'Edit kustomize overlays - set images, labels, annotations, name/namespace, replicas, ConfigMap values'
-author: 'Skyhook'
-
+name: Skyhook Kustomize Edit
+description: Edit kustomize overlays - set images, labels, annotations, name/namespace, replicas, ConfigMap values
+author: Skyhook
 branding:
-  icon: 'edit'
-  color: 'purple'
-
+  icon: edit
+  color: purple
 inputs:
   overlay_dir:
-    description: 'Path to kustomize overlay directory'
+    description: Path to kustomize overlay directory
     required: true
   debug:
-    description: 'Enable debug output'
+    description: Enable debug output
     required: false
     default: 'false'
   image:
-    description: 'Container image (e.g., registry.io/app or registry.io/app:v1.2.3)'
+    description: Container image (e.g., registry.io/app or registry.io/app:v1.2.3)
     required: false
   tag:
-    description: 'Image tag (e.g., v1.2.3, latest, sha-abc123)'
+    description: Image tag (e.g., v1.2.3, latest, sha-abc123)
     required: false
   images_json:
     description: 'Multiple images as JSON array: [{"name":"registry.io/app","newName":"other.io/app","newTag":"v1.2.3"}]'
     required: false
   version_label:
-    description: 'Value for app.kubernetes.io/version label'
+    description: Value for app.kubernetes.io/version label
     required: false
   annotations:
-    description: 'Annotations to add (key:value or key=value format, one per line)'
+    description: Annotations to add (key:value or key=value format, one per line)
     required: false
   labels:
-    description: 'Labels to add (key:value or key=value format, one per line)'
+    description: Labels to add (key:value or key=value format, one per line)
     required: false
   name_prefix:
-    description: 'Name prefix to set'
+    description: Name prefix to set
     required: false
   name_suffix:
-    description: 'Name suffix to set'
+    description: Name suffix to set
     required: false
   namespace:
-    description: 'Namespace to set'
+    description: Namespace to set
     required: false
   replicas:
-    description: 'Replicas count to set (JSON format, e.g., [{"name":"deployment-name","count":3}])'
+    description: Replicas count to set (JSON format, e.g., [{"name":"deployment-name","count":3}])
     required: false
   env_patches:
-    description: 'Environment file patches (JSON format matching patch-env-files, e.g., {"container.env":{"SENTRY_RELEASE":"v1.2.3"}})'
+    description: Environment file patches (JSON format matching patch-env-files, e.g., {"container.env":{"SENTRY_RELEASE":"v1.2.3"}})
     required: false
-
 outputs:
   overlay_dir:
-    description: 'Path to the edited overlay'
+    description: Path to the edited overlay
     value: ${{ inputs.overlay_dir }}
   kustomization_file:
-    description: 'Path to kustomization.yaml'
+    description: Path to kustomization.yaml
     value: ${{ inputs.overlay_dir }}/kustomization.yaml
-
 runs:
-  using: 'composite'
+  using: composite
   steps:
-    - name: Check required tools
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "🔍 Checking required tools..."
+  - name: Install locked yq
+    shell: bash
+    run: python3 "${{ github.action_path }}/.locked/install.py" yq
+    if: inputs.version_label != ''
+  - name: Check required tools
+    shell: bash
+    run: "set -euo pipefail\necho \"\U0001F50D Checking required tools...\"\n\n# Check for kustomize\nif ! command -v kustomize >/dev/null 2>&1; then\n  echo \"::error::kustomize not found. Please install it first. See: https://kubectl.docs.kubernetes.io/installation/kustomize/\"\n  exit 1\nfi\n\n# Check for jq (needed for replicas)\nif [ -n \"${{ inputs.replicas }}\" ] && ! command -v jq >/dev/null 2>&1; then\n  echo \"::error::jq not found. Required for replicas input. Install with: apt-get install -y jq\"\n  exit 1\nfi\n\n# Check for yq (needed for version_label)\nif [ -n \"${{ inputs.version_label }}\" ] && ! command -v yq >/dev/null 2>&1; then\n  echo \"::warning::yq not found. Will be installed automatically if version_label is used.\"\nfi\n\necho \"✅ Required tools available\"\n"
+  - name: Validate overlay directory
+    shell: bash
+    run: "set -euo pipefail\nif [ ! -d \"${{ inputs.overlay_dir }}\" ]; then\n  echo \"::error::Overlay directory not found: ${{ inputs.overlay_dir }}\"\n  exit 1\nfi\n\nif [ ! -f \"${{ inputs.overlay_dir }}/kustomization.yaml\" ]; then\n  echo \"::error::No kustomization.yaml found in ${{ inputs.overlay_dir }}\"\n  exit 1\nfi\n\necho \"✅ Found kustomization.yaml in: ${{ inputs.overlay_dir }}\"\n"
+  - name: Patch environment files
+    if: inputs.env_patches != ''
+    uses: skyhook-io/patch-env-files@8b8d0744751fa26f9ad172c8216885915de59861
+    with:
+      path: ${{ inputs.overlay_dir }}
+      patches: ${{ inputs.env_patches }}
+  - name: Normalize image inputs
+    id: normalize
+    if: inputs.image != '' || inputs.images_json != ''
+    shell: bash
+    run: "set -euo pipefail\n\nif [ -n \"${{ inputs.images_json }}\" ]; then\n  # Using images_json - ensure image/tag are not provided\n  if [ -n \"${{ inputs.image }}\" ] || [ -n \"${{ inputs.tag }}\" ]; then\n    echo \"::error::When using images_json, do not provide image or tag parameters\"\n    exit 1\n  fi\n  echo \"using_images_json=true\" >> $GITHUB_OUTPUT\n  echo \"normalized_image=\" >> $GITHUB_OUTPUT\n  echo \"normalized_tag=\" >> $GITHUB_OUTPUT\nelse\n  # Not using images_json - require image parameter\n  if [ -z \"${{ inputs.image }}\" ]; then\n    echo \"::error::Must provide either images_json OR image parameter\"\n    exit 1\n  fi\n\n  # Check if image contains embedded tag (backwards compatibility: image:tag format)\n  IMAGE=\"${{ inputs.image }}\"\n  if [[ \"$IMAGE\" =~ ^(.+):([^/]+)$ ]]; then\n    # Split image:tag format (backwards compatibility)\n    NORMALIZED_IMAGE=\"${BASH_REMATCH[1]}\"\n    NORMALIZED_TAG=\"${BASH_REMATCH[2]}\"\n    echo \"normalized_image=$NORMALIZED_IMAGE\"\
+      \ >> $GITHUB_OUTPUT\n    echo \"normalized_tag=$NORMALIZED_TAG\" >> $GITHUB_OUTPUT\n    echo \"✓ Detected embedded tag in image parameter - image: $NORMALIZED_IMAGE, tag: $NORMALIZED_TAG\"\n    # Warn if both formats provided\n    if [ -n \"${{ inputs.tag }}\" ]; then\n      echo \"::warning::Both image:tag format and separate tag parameter provided. Using embedded tag from image.\"\n    fi\n  else\n    # Image doesn't contain tag, require explicit tag parameter\n    if [ -z \"${{ inputs.tag }}\" ]; then\n      echo \"::error::Image parameter does not contain a tag. Please provide the tag parameter or use image:tag format.\"\n      exit 1\n    fi\n    echo \"normalized_image=$IMAGE\" >> $GITHUB_OUTPUT\n    echo \"normalized_tag=${{ inputs.tag }}\" >> $GITHUB_OUTPUT\n    echo \"✓ Using separate image and tag parameters\"\n  fi\n  echo \"using_images_json=false\" >> $GITHUB_OUTPUT\nfi\n"
+  - name: Set images (single or multiple)
+    if: inputs.image != '' || inputs.images_json != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: "set -euo pipefail\n\n# Helper: patch a single image entry using yq (PATCH semantics)\nyq_set_image() {\n  local name=\"$1\" new_tag=\"$2\" new_name=\"${3:-}\"\n\n  export YQ_IMG_NAME=\"$name\"\n  export YQ_IMG_TAG=\"$new_tag\"\n\n  if yq -e \".images[] | select(.name == env(YQ_IMG_NAME))\" kustomization.yaml >/dev/null 2>&1; then\n    # Entry exists — patch only provided fields\n    yq -i '(.images[] | select(.name == env(YQ_IMG_NAME))).newTag = env(YQ_IMG_TAG)' kustomization.yaml\n    if [ -n \"$new_name\" ]; then\n      export YQ_IMG_NEWNAME=\"$new_name\"\n      yq -i '(.images[] | select(.name == env(YQ_IMG_NAME))).newName = env(YQ_IMG_NEWNAME)' kustomization.yaml\n    fi\n  else\n    # Entry doesn't exist — append\n    if [ -n \"$new_name\" ]; then\n      export YQ_IMG_NEWNAME=\"$new_name\"\n      yq -i '.images += [{\"name\": env(YQ_IMG_NAME), \"newName\": env(YQ_IMG_NEWNAME), \"newTag\": env(YQ_IMG_TAG)}]' kustomization.yaml\n    else\n      yq -i '.images += [{\"name\":\
+      \ env(YQ_IMG_NAME), \"newTag\": env(YQ_IMG_TAG)}]' kustomization.yaml\n    fi\n  fi\n}\n\n# Process images_json\nif [ -n \"${{ inputs.images_json }}\" ]; then\n  # Validate JSON format\n  if ! echo '${{ inputs.images_json }}' | jq empty 2>/dev/null; then\n    echo \"::error::Invalid images_json format. Expected JSON array like: [{\\\"name\\\":\\\"registry.io/app\\\",\\\"newTag\\\":\\\"v1.2.3\\\"}]\"\n    exit 1\n  fi\n\n  # Count images\n  IMAGE_COUNT=$(echo '${{ inputs.images_json }}' | jq 'length')\n\n  # Collect image summary for logging\n  IMAGE_SUMMARY=$(echo '${{ inputs.images_json }}' | jq -r '.[] | \"\\(.name):\\(.newTag)\"' | paste -sd ', ' -)\n\n  # Iterate through images and set each one\n  echo '${{ inputs.images_json }}' | jq -c '.[]' | while read -r img; do\n    NAME=$(echo \"$img\" | jq -r '.name // empty')\n    NEW_NAME=$(echo \"$img\" | jq -r '.newName // empty')\n    NEW_TAG=$(echo \"$img\" | jq -r '.newTag // empty')\n\n    if [ -z \"$NAME\" ]; then\n      echo \"\
+      ::error::Image entry missing 'name' field: $img\"\n      exit 1\n    fi\n\n    if [ -z \"$NEW_TAG\" ]; then\n      echo \"::error::Image entry missing 'newTag' field: $img\"\n      exit 1\n    fi\n\n    yq_set_image \"$NAME\" \"$NEW_TAG\" \"$NEW_NAME\"\n  done\n\n  echo \"✅ Set $IMAGE_COUNT image(s): $IMAGE_SUMMARY\"\n\n# Process single image (using normalized values)\nelse\n  NORM_IMAGE=\"${{ steps.normalize.outputs.normalized_image }}\"\n  NORM_TAG=\"${{ steps.normalize.outputs.normalized_tag }}\"\n\n  yq_set_image \"$NORM_IMAGE\" \"$NORM_TAG\"\n  echo \"✅ Set image: $NORM_IMAGE:$NORM_TAG\"\nfi\n"
+  - name: Set version label
+    if: inputs.version_label != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: "set -euo pipefail\necho \"\U0001F3F7️ Setting version label: ${{ inputs.version_label }}\"\n\nVERSION_LABEL=\"${{ inputs.version_label }}\"\nexport VERSION_LABEL\n\n# 1) Remove any old commonLabels version to avoid selector contamination\nyq -i 'del(.commonLabels.\"app.kubernetes.io/version\")' kustomization.yaml 2>/dev/null || true\n\n# 2) Update existing entry or create new one\nif yq -e '.labels[] | select(.pairs.\"app.kubernetes.io/version\")' kustomization.yaml >/dev/null 2>&1; then\n  # Update existing entry and ensure correct settings\n  yq -i '(.labels[] | select(.pairs.\"app.kubernetes.io/version\")).pairs.\"app.kubernetes.io/version\" = env(VERSION_LABEL)' kustomization.yaml\n  yq -i '(.labels[] | select(.pairs.\"app.kubernetes.io/version\")).includeTemplates = true' kustomization.yaml\n  yq -i '(.labels[] | select(.pairs.\"app.kubernetes.io/version\")).includeSelectors = false' kustomization.yaml\nelse\n  # Add new entry with correct settings\n  yq -i '.labels += [{\"\
+      pairs\": {\"app.kubernetes.io/version\": env(VERSION_LABEL)}, \"includeSelectors\": false, \"includeTemplates\": true}]' kustomization.yaml\nfi\n\necho \"✅ Version label set to: $VERSION_LABEL\"\n"
+  - name: Add annotations
+    if: inputs.annotations != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: "set -euo pipefail\necho \"\U0001F4DD Adding annotations...\"\necho \"${{ inputs.annotations }}\" | while IFS= read -r line; do\n  # Strip trailing comments and trim whitespace\n  line=\"${line%%#*}\"\n  line=\"$(echo \"$line\" | xargs)\"\n  [ -z \"$line\" ] && continue\n  \n  # Convert all = to : for kustomize format (support both formats)\n  line=\"${line//=/:}\"\n  echo \"  - $line\"\n  kustomize edit set annotation \"$line\"\ndone\n"
+  - name: Add labels
+    if: inputs.labels != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: "set -euo pipefail\necho \"\U0001F3F7️ Adding labels...\"\necho \"${{ inputs.labels }}\" | while IFS= read -r line; do\n  # Strip trailing comments and trim whitespace\n  line=\"${line%%#*}\"\n  line=\"$(echo \"$line\" | xargs)\"\n  [ -z \"$line\" ] && continue\n  \n  # Convert all = to : for kustomize format (support both formats)\n  line=\"${line//=/:}\"\n  echo \"  - $line\"\n  kustomize edit set label \"$line\"\ndone\n"
+  - name: Set name prefix
+    if: inputs.name_prefix != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: 'set -euo pipefail
 
-        # Check for kustomize
-        if ! command -v kustomize >/dev/null 2>&1; then
-          echo "::error::kustomize not found. Please install it first. See: https://kubectl.docs.kubernetes.io/installation/kustomize/"
-          exit 1
-        fi
+      echo "📛 Setting name prefix: ${{ inputs.name_prefix }}"
 
-        # Check for jq (needed for replicas)
-        if [ -n "${{ inputs.replicas }}" ] && ! command -v jq >/dev/null 2>&1; then
-          echo "::error::jq not found. Required for replicas input. Install with: apt-get install -y jq"
-          exit 1
-        fi
+      kustomize edit set nameprefix "${{ inputs.name_prefix }}"
 
-        # Check for yq (needed for version_label)
-        if [ -n "${{ inputs.version_label }}" ] && ! command -v yq >/dev/null 2>&1; then
-          echo "::warning::yq not found. Will be installed automatically if version_label is used."
-        fi
+      '
+  - name: Set name suffix
+    if: inputs.name_suffix != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: 'set -euo pipefail
 
-        echo "✅ Required tools available"
-    
-    - name: Validate overlay directory
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ ! -d "${{ inputs.overlay_dir }}" ]; then
-          echo "::error::Overlay directory not found: ${{ inputs.overlay_dir }}"
-          exit 1
-        fi
-        
-        if [ ! -f "${{ inputs.overlay_dir }}/kustomization.yaml" ]; then
-          echo "::error::No kustomization.yaml found in ${{ inputs.overlay_dir }}"
-          exit 1
-        fi
-        
-        echo "✅ Found kustomization.yaml in: ${{ inputs.overlay_dir }}"
+      echo "📛 Setting name suffix: ${{ inputs.name_suffix }}"
 
-    - name: Patch environment files
-      if: inputs.env_patches != ''
-      uses: skyhook-io/patch-env-files@v1
-      with:
-        path: ${{ inputs.overlay_dir }}
-        patches: ${{ inputs.env_patches }}
+      kustomize edit set namesuffix "${{ inputs.name_suffix }}"
 
-    - name: Normalize image inputs
-      id: normalize
-      if: inputs.image != '' || inputs.images_json != ''
-      shell: bash
-      run: |
-        set -euo pipefail
+      '
+  - name: Set namespace
+    if: inputs.namespace != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: 'set -euo pipefail
 
-        if [ -n "${{ inputs.images_json }}" ]; then
-          # Using images_json - ensure image/tag are not provided
-          if [ -n "${{ inputs.image }}" ] || [ -n "${{ inputs.tag }}" ]; then
-            echo "::error::When using images_json, do not provide image or tag parameters"
-            exit 1
-          fi
-          echo "using_images_json=true" >> $GITHUB_OUTPUT
-          echo "normalized_image=" >> $GITHUB_OUTPUT
-          echo "normalized_tag=" >> $GITHUB_OUTPUT
-        else
-          # Not using images_json - require image parameter
-          if [ -z "${{ inputs.image }}" ]; then
-            echo "::error::Must provide either images_json OR image parameter"
-            exit 1
-          fi
+      echo "📁 Setting namespace: ${{ inputs.namespace }}"
 
-          # Check if image contains embedded tag (backwards compatibility: image:tag format)
-          IMAGE="${{ inputs.image }}"
-          if [[ "$IMAGE" =~ ^(.+):([^/]+)$ ]]; then
-            # Split image:tag format (backwards compatibility)
-            NORMALIZED_IMAGE="${BASH_REMATCH[1]}"
-            NORMALIZED_TAG="${BASH_REMATCH[2]}"
-            echo "normalized_image=$NORMALIZED_IMAGE" >> $GITHUB_OUTPUT
-            echo "normalized_tag=$NORMALIZED_TAG" >> $GITHUB_OUTPUT
-            echo "✓ Detected embedded tag in image parameter - image: $NORMALIZED_IMAGE, tag: $NORMALIZED_TAG"
-            # Warn if both formats provided
-            if [ -n "${{ inputs.tag }}" ]; then
-              echo "::warning::Both image:tag format and separate tag parameter provided. Using embedded tag from image."
-            fi
-          else
-            # Image doesn't contain tag, require explicit tag parameter
-            if [ -z "${{ inputs.tag }}" ]; then
-              echo "::error::Image parameter does not contain a tag. Please provide the tag parameter or use image:tag format."
-              exit 1
-            fi
-            echo "normalized_image=$IMAGE" >> $GITHUB_OUTPUT
-            echo "normalized_tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-            echo "✓ Using separate image and tag parameters"
-          fi
-          echo "using_images_json=false" >> $GITHUB_OUTPUT
-        fi
+      kustomize edit set namespace "${{ inputs.namespace }}"
 
-    - name: Set images (single or multiple)
-      if: inputs.image != '' || inputs.images_json != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
+      '
+  - name: Set replicas
+    if: inputs.replicas != ''
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: "set -euo pipefail\necho \"\U0001F522 Setting replicas...\"\nREPLICAS='${{ inputs.replicas }}'\n\n# Validate JSON\nif ! echo \"$REPLICAS\" | jq empty 2>/dev/null; then\n  echo \"::error::Invalid replicas JSON format\"\n  exit 1\nfi\n\n# Process each replica setting\necho \"$REPLICAS\" | jq -c '.[]' | while read -r replica; do\n  NAME=$(echo \"$replica\" | jq -r '.name // empty')\n  COUNT=$(echo \"$replica\" | jq -r '.count // empty')\n  if [ -z \"$NAME\" ] || [ -z \"$COUNT\" ]; then\n    echo \"::error::replicas entries must have {\\\"name\\\",\\\"count\\\"}\"\n    exit 1\n  fi\n  echo \"  - $NAME: $COUNT replicas\"\n  kustomize edit set replicas \"${NAME}=${COUNT}\"\ndone\n"
+  - name: Validate kustomization
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: "set -euo pipefail\n\n# Auto-detect helmCharts; pass --enable-helm only when present.\nHELM_FLAG=()\nif command -v yq >/dev/null 2>&1; then\n  if yq -e '.helmCharts // [] | length > 0' kustomization.yaml >/dev/null 2>&1; then\n    HELM_FLAG=(--enable-helm --load-restrictor=LoadRestrictionsNone)\n  fi\nelif grep -qE '^helmCharts:[[:space:]]*$' kustomization.yaml 2>/dev/null; then\n  HELM_FLAG=(--enable-helm --load-restrictor=LoadRestrictionsNone)\nfi\n\necho \"✅ Validating kustomization...\"\nif ! kustomize build \"${HELM_FLAG[@]}\" . > /dev/null 2>&1; then\n  echo \"::error::Kustomization validation failed\"\n  kustomize build \"${HELM_FLAG[@]}\" . 2>&1 | head -20\n  exit 1\nfi\n\n# Check that version label is not in selectors (would cause immutable field error)\nif [ -n \"${{ inputs.version_label }}\" ]; then\n  echo \"\U0001F50D Checking selectors don't contain version label...\"\n  MANIFESTS=$(kustomize build \"${HELM_FLAG[@]}\" .)\n  # Use yq to check if any selector.matchLabels\
+      \ contains the version label\n  if echo \"$MANIFESTS\" | yq -e 'select(.spec.selector.matchLabels.\"app.kubernetes.io/version\")' >/dev/null 2>&1; then\n    echo \"::error::Version label found in selector.matchLabels (immutable field). This would cause deployment to fail.\"\n    echo \"::error::The version label should only be in pod templates, not selectors.\"\n    exit 1\n  fi\nfi\n\necho \"✅ Kustomization is valid\"\n"
+  - name: Show debug output
+    if: inputs.debug == 'true'
+    shell: bash
+    working-directory: ${{ inputs.overlay_dir }}
+    run: 'set -euo pipefail
 
-        # Helper: patch a single image entry using yq (PATCH semantics)
-        yq_set_image() {
-          local name="$1" new_tag="$2" new_name="${3:-}"
+      echo "📋 Final kustomization.yaml:"
 
-          export YQ_IMG_NAME="$name"
-          export YQ_IMG_TAG="$new_tag"
-
-          if yq -e ".images[] | select(.name == env(YQ_IMG_NAME))" kustomization.yaml >/dev/null 2>&1; then
-            # Entry exists — patch only provided fields
-            yq -i '(.images[] | select(.name == env(YQ_IMG_NAME))).newTag = env(YQ_IMG_TAG)' kustomization.yaml
-            if [ -n "$new_name" ]; then
-              export YQ_IMG_NEWNAME="$new_name"
-              yq -i '(.images[] | select(.name == env(YQ_IMG_NAME))).newName = env(YQ_IMG_NEWNAME)' kustomization.yaml
-            fi
-          else
-            # Entry doesn't exist — append
-            if [ -n "$new_name" ]; then
-              export YQ_IMG_NEWNAME="$new_name"
-              yq -i '.images += [{"name": env(YQ_IMG_NAME), "newName": env(YQ_IMG_NEWNAME), "newTag": env(YQ_IMG_TAG)}]' kustomization.yaml
-            else
-              yq -i '.images += [{"name": env(YQ_IMG_NAME), "newTag": env(YQ_IMG_TAG)}]' kustomization.yaml
-            fi
-          fi
-        }
-
-        # Process images_json
-        if [ -n "${{ inputs.images_json }}" ]; then
-          # Validate JSON format
-          if ! echo '${{ inputs.images_json }}' | jq empty 2>/dev/null; then
-            echo "::error::Invalid images_json format. Expected JSON array like: [{\"name\":\"registry.io/app\",\"newTag\":\"v1.2.3\"}]"
-            exit 1
-          fi
-
-          # Count images
-          IMAGE_COUNT=$(echo '${{ inputs.images_json }}' | jq 'length')
-
-          # Collect image summary for logging
-          IMAGE_SUMMARY=$(echo '${{ inputs.images_json }}' | jq -r '.[] | "\(.name):\(.newTag)"' | paste -sd ', ' -)
-
-          # Iterate through images and set each one
-          echo '${{ inputs.images_json }}' | jq -c '.[]' | while read -r img; do
-            NAME=$(echo "$img" | jq -r '.name // empty')
-            NEW_NAME=$(echo "$img" | jq -r '.newName // empty')
-            NEW_TAG=$(echo "$img" | jq -r '.newTag // empty')
-
-            if [ -z "$NAME" ]; then
-              echo "::error::Image entry missing 'name' field: $img"
-              exit 1
-            fi
-
-            if [ -z "$NEW_TAG" ]; then
-              echo "::error::Image entry missing 'newTag' field: $img"
-              exit 1
-            fi
-
-            yq_set_image "$NAME" "$NEW_TAG" "$NEW_NAME"
-          done
-
-          echo "✅ Set $IMAGE_COUNT image(s): $IMAGE_SUMMARY"
-
-        # Process single image (using normalized values)
-        else
-          NORM_IMAGE="${{ steps.normalize.outputs.normalized_image }}"
-          NORM_TAG="${{ steps.normalize.outputs.normalized_tag }}"
-
-          yq_set_image "$NORM_IMAGE" "$NORM_TAG"
-          echo "✅ Set image: $NORM_IMAGE:$NORM_TAG"
-        fi
-    
-    - name: Set version label
-      if: inputs.version_label != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "🏷️ Setting version label: ${{ inputs.version_label }}"
-
-        # Check if yq is available
-        if ! command -v yq >/dev/null 2>&1; then
-          echo "::error::yq not found. Installing yq..."
-          # Try to install yq based on the platform
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update && sudo apt-get install -y yq
-          elif command -v brew >/dev/null 2>&1; then
-            brew install yq
-          else
-            # Fallback to downloading binary directly
-            echo "Installing yq binary..."
-            YQ_VERSION="v4.35.1"
-            ARCH=$(uname -m)
-            OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-            if [ "$ARCH" = "x86_64" ]; then ARCH="amd64"; fi
-            curl -sL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_${OS}_${ARCH}" -o /tmp/yq
-            chmod +x /tmp/yq
-            sudo mv /tmp/yq /usr/local/bin/yq
-          fi
-        fi
-
-        VERSION_LABEL="${{ inputs.version_label }}"
-        export VERSION_LABEL
-
-        # 1) Remove any old commonLabels version to avoid selector contamination
-        yq -i 'del(.commonLabels."app.kubernetes.io/version")' kustomization.yaml 2>/dev/null || true
-
-        # 2) Update existing entry or create new one
-        if yq -e '.labels[] | select(.pairs."app.kubernetes.io/version")' kustomization.yaml >/dev/null 2>&1; then
-          # Update existing entry and ensure correct settings
-          yq -i '(.labels[] | select(.pairs."app.kubernetes.io/version")).pairs."app.kubernetes.io/version" = env(VERSION_LABEL)' kustomization.yaml
-          yq -i '(.labels[] | select(.pairs."app.kubernetes.io/version")).includeTemplates = true' kustomization.yaml
-          yq -i '(.labels[] | select(.pairs."app.kubernetes.io/version")).includeSelectors = false' kustomization.yaml
-        else
-          # Add new entry with correct settings
-          yq -i '.labels += [{"pairs": {"app.kubernetes.io/version": env(VERSION_LABEL)}, "includeSelectors": false, "includeTemplates": true}]' kustomization.yaml
-        fi
-
-        echo "✅ Version label set to: $VERSION_LABEL"
-    
-    - name: Add annotations
-      if: inputs.annotations != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "📝 Adding annotations..."
-        echo "${{ inputs.annotations }}" | while IFS= read -r line; do
-          # Strip trailing comments and trim whitespace
-          line="${line%%#*}"
-          line="$(echo "$line" | xargs)"
-          [ -z "$line" ] && continue
-          
-          # Convert all = to : for kustomize format (support both formats)
-          line="${line//=/:}"
-          echo "  - $line"
-          kustomize edit set annotation "$line"
-        done
-    
-    - name: Add labels
-      if: inputs.labels != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "🏷️ Adding labels..."
-        echo "${{ inputs.labels }}" | while IFS= read -r line; do
-          # Strip trailing comments and trim whitespace
-          line="${line%%#*}"
-          line="$(echo "$line" | xargs)"
-          [ -z "$line" ] && continue
-          
-          # Convert all = to : for kustomize format (support both formats)
-          line="${line//=/:}"
-          echo "  - $line"
-          kustomize edit set label "$line"
-        done
-    
-    - name: Set name prefix
-      if: inputs.name_prefix != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "📛 Setting name prefix: ${{ inputs.name_prefix }}"
-        kustomize edit set nameprefix "${{ inputs.name_prefix }}"
-    
-    - name: Set name suffix
-      if: inputs.name_suffix != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "📛 Setting name suffix: ${{ inputs.name_suffix }}"
-        kustomize edit set namesuffix "${{ inputs.name_suffix }}"
-    
-    - name: Set namespace
-      if: inputs.namespace != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "📁 Setting namespace: ${{ inputs.namespace }}"
-        kustomize edit set namespace "${{ inputs.namespace }}"
-    
-    - name: Set replicas
-      if: inputs.replicas != ''
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "🔢 Setting replicas..."
-        REPLICAS='${{ inputs.replicas }}'
-        
-        # Validate JSON
-        if ! echo "$REPLICAS" | jq empty 2>/dev/null; then
-          echo "::error::Invalid replicas JSON format"
-          exit 1
-        fi
-        
-        # Process each replica setting
-        echo "$REPLICAS" | jq -c '.[]' | while read -r replica; do
-          NAME=$(echo "$replica" | jq -r '.name // empty')
-          COUNT=$(echo "$replica" | jq -r '.count // empty')
-          if [ -z "$NAME" ] || [ -z "$COUNT" ]; then
-            echo "::error::replicas entries must have {\"name\",\"count\"}"
-            exit 1
-          fi
-          echo "  - $NAME: $COUNT replicas"
-          kustomize edit set replicas "${NAME}=${COUNT}"
-        done
-
-    - name: Validate kustomization
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-
-        # Auto-detect helmCharts; pass --enable-helm only when present.
-        HELM_FLAG=()
-        if command -v yq >/dev/null 2>&1; then
-          if yq -e '.helmCharts // [] | length > 0' kustomization.yaml >/dev/null 2>&1; then
-            HELM_FLAG=(--enable-helm --load-restrictor=LoadRestrictionsNone)
-          fi
-        elif grep -qE '^helmCharts:[[:space:]]*$' kustomization.yaml 2>/dev/null; then
-          HELM_FLAG=(--enable-helm --load-restrictor=LoadRestrictionsNone)
-        fi
-
-        echo "✅ Validating kustomization..."
-        if ! kustomize build "${HELM_FLAG[@]}" . > /dev/null 2>&1; then
-          echo "::error::Kustomization validation failed"
-          kustomize build "${HELM_FLAG[@]}" . 2>&1 | head -20
-          exit 1
-        fi
-
-        # Check that version label is not in selectors (would cause immutable field error)
-        if [ -n "${{ inputs.version_label }}" ]; then
-          echo "🔍 Checking selectors don't contain version label..."
-          MANIFESTS=$(kustomize build "${HELM_FLAG[@]}" .)
-          # Use yq to check if any selector.matchLabels contains the version label
-          if echo "$MANIFESTS" | yq -e 'select(.spec.selector.matchLabels."app.kubernetes.io/version")' >/dev/null 2>&1; then
-            echo "::error::Version label found in selector.matchLabels (immutable field). This would cause deployment to fail."
-            echo "::error::The version label should only be in pod templates, not selectors."
-            exit 1
-          fi
-        fi
-
-        echo "✅ Kustomization is valid"
-    
-    - name: Show debug output
-      if: inputs.debug == 'true'
-      shell: bash
-      working-directory: ${{ inputs.overlay_dir }}
-      run: |
-        set -euo pipefail
-        echo "📋 Final kustomization.yaml:"
-        cat kustomization.yaml
+      cat kustomization.yaml'
