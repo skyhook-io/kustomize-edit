@@ -377,17 +377,28 @@ runs:
       working-directory: ${{ inputs.overlay_dir }}
       run: |
         set -euo pipefail
+
+        # Auto-detect helmCharts; pass --enable-helm only when present.
+        HELM_FLAG=()
+        if command -v yq >/dev/null 2>&1; then
+          if yq -e '.helmCharts // [] | length > 0' kustomization.yaml >/dev/null 2>&1; then
+            HELM_FLAG=(--enable-helm)
+          fi
+        elif grep -qE '^helmCharts:[[:space:]]*$' kustomization.yaml 2>/dev/null; then
+          HELM_FLAG=(--enable-helm)
+        fi
+
         echo "✅ Validating kustomization..."
-        if ! kustomize build . > /dev/null 2>&1; then
+        if ! kustomize build "${HELM_FLAG[@]}" . > /dev/null 2>&1; then
           echo "::error::Kustomization validation failed"
-          kustomize build . 2>&1 | head -20
+          kustomize build "${HELM_FLAG[@]}" . 2>&1 | head -20
           exit 1
         fi
 
         # Check that version label is not in selectors (would cause immutable field error)
         if [ -n "${{ inputs.version_label }}" ]; then
           echo "🔍 Checking selectors don't contain version label..."
-          MANIFESTS=$(kustomize build .)
+          MANIFESTS=$(kustomize build "${HELM_FLAG[@]}" .)
           # Use yq to check if any selector.matchLabels contains the version label
           if echo "$MANIFESTS" | yq -e 'select(.spec.selector.matchLabels."app.kubernetes.io/version")' >/dev/null 2>&1; then
             echo "::error::Version label found in selector.matchLabels (immutable field). This would cause deployment to fail."
